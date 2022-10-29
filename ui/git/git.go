@@ -38,5 +38,5 @@ func RepoURL(host string, port int, name string) string {
 	if port != 22 {
 		p += fmt.Sprintf(":%d", port)
 	}
-	return fmt.Sprintf("git clone ssh://%s/%s", host+p, name)
+	return fmt.Sprintf("git clone git@%s:%s", host+p, name)
 }

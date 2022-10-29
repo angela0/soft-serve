@@ -1,0 +1,22 @@
+version: "3"
+
+services:
+  soft_serve:
+    image: soft-serve
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: ${WORKDIR:-/data}
+    ports:
+      # - "127.0.0.1:8022:23231"
+      - "${HOST_BIND_ADDRESS}:${HOST_PORT}:${SOFT_SERVE_PORT}"
+    volumes:
+      - /home/git/.ssh/:/soft_serve/.ssh/
+      - ${HOST_REPOS_DIR:-.}/repos:${WORKDIR:-/data}/repos/
+      - ${HOST_SOFT_DIR:-.}/soft:/usr/local/bin/soft
+    env_file: .env
+    # environment:
+    #   - USER_UID=1001
+    #   - USER_GID=1001
+    restart: always
+    command: /usr/local/bin/soft serve

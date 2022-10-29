@@ -5,3 +5,5 @@ dist
 testdata
 completions/
 manpages/
+soft
+soft-serve.tgz
