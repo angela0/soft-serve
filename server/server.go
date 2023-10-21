@@ -2,91 +2,169 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
-	"net"
+	"net/http"
 
-	appCfg "github.com/charmbracelet/soft-serve/config"
+	"github.com/charmbracelet/log"
+
+	"github.com/charmbracelet/soft-serve/server/backend"
 	"github.com/charmbracelet/soft-serve/server/config"
-	"github.com/charmbracelet/wish"
-	bm "github.com/charmbracelet/wish/bubbletea"
-	gm "github.com/charmbracelet/wish/git"
-	lm "github.com/charmbracelet/wish/logging"
-	rm "github.com/charmbracelet/wish/recover"
-	"github.com/gliderlabs/ssh"
-	"github.com/muesli/termenv"
+	"github.com/charmbracelet/soft-serve/server/cron"
+	"github.com/charmbracelet/soft-serve/server/daemon"
+	"github.com/charmbracelet/soft-serve/server/db"
+	"github.com/charmbracelet/soft-serve/server/jobs"
+	sshsrv "github.com/charmbracelet/soft-serve/server/ssh"
+	"github.com/charmbracelet/soft-serve/server/stats"
+	"github.com/charmbracelet/soft-serve/server/web"
+	"github.com/charmbracelet/ssh"
+	"golang.org/x/sync/errgroup"
 )
 
 // Server is the Soft Serve server.
 type Server struct {
-	SSHServer *ssh.Server
-	Config    *config.Config
-	config    *appCfg.Config
+	SSHServer   *sshsrv.SSHServer
+	GitDaemon   *daemon.GitDaemon
+	HTTPServer  *web.HTTPServer
+	StatsServer *stats.StatsServer
+	Cron        *cron.Scheduler
+	Config      *config.Config
+	Backend     *backend.Backend
+	DB          *db.DB
+
+	logger *log.Logger
+	ctx    context.Context
 }
 
-// NewServer returns a new *ssh.Server configured to serve Soft Serve. The SSH
-// server key-pair will be created if none exists. An initial admin SSH public
-// key can be provided with authKey. If authKey is provided, access will be
-// restricted to that key. If authKey is not provided, the server will be
-// publicly writable until configured otherwise by cloning the `config` repo.
-func NewServer(cfg *config.Config) *Server {
-	ac, err := appCfg.NewConfig(cfg)
-	if err != nil {
-		log.Fatal(err)
+// NewServer returns a new *Server configured to serve Soft Serve. The SSH
+// server key-pair will be created if none exists.
+// It expects a context with *backend.Backend, *db.DB, *log.Logger, and
+// *config.Config attached.
+func NewServer(ctx context.Context) (*Server, error) {
+	var err error
+	cfg := config.FromContext(ctx)
+	be := backend.FromContext(ctx)
+	db := db.FromContext(ctx)
+	logger := log.FromContext(ctx).WithPrefix("server")
+	srv := &Server{
+		Config:  cfg,
+		Backend: be,
+		DB:      db,
+		logger:  log.FromContext(ctx).WithPrefix("server"),
+		ctx:     ctx,
 	}
-	mw := []wish.Middleware{
-		rm.MiddlewareWithLogger(
-			cfg.ErrorLog,
-			softMiddleware(ac),
-			bm.MiddlewareWithProgramHandler(SessionHandler(ac), termenv.ANSI256),
-			gm.Middleware(cfg.RepoPath, ac),
-			lm.Middleware(),
-		),
-	}
-	s, err := wish.NewServer(
-		ssh.PublicKeyAuth(ac.PublicKeyHandler),
-		ssh.KeyboardInteractiveAuth(ac.KeyboardInteractiveHandler),
-		wish.WithAddress(fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port)),
-		wish.WithHostKeyPath(cfg.KeyPath),
-		wish.WithMiddleware(mw...),
-	)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	return &Server{
-		SSHServer: s,
-		Config:    cfg,
-		config:    ac,
-	}
-}
 
-// Reload reloads the server configuration.
-func (srv *Server) Reload() error {
-	return srv.config.Reload()
+	// Add cron jobs.
+	sched := cron.NewScheduler(ctx)
+	for n, j := range jobs.List() {
+		id, err := sched.AddFunc(j.Spec, j.Func(ctx))
+		if err != nil {
+			logger.Warn("error adding cron job", "job", n, "err", err)
+		}
+
+		j.ID = id
+	}
+
+	srv.Cron = sched
+
+	srv.SSHServer, err = sshsrv.NewSSHServer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create ssh server: %w", err)
+	}
+
+	srv.GitDaemon, err = daemon.NewGitDaemon(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create git daemon: %w", err)
+	}
+
+	srv.HTTPServer, err = web.NewHTTPServer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create http server: %w", err)
+	}
+
+	srv.StatsServer, err = stats.NewStatsServer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create stats server: %w", err)
+	}
+
+	return srv, nil
 }
 
 // Start starts the SSH server.
-func (srv *Server) Start() error {
-	if err := srv.SSHServer.ListenAndServe(); err != ssh.ErrServerClosed {
-		return err
-	}
-	return nil
-}
-
-// Serve serves the SSH server using the provided listener.
-func (srv *Server) Serve(l net.Listener) error {
-	if err := srv.SSHServer.Serve(l); err != ssh.ErrServerClosed {
-		return err
-	}
-	return nil
+func (s *Server) Start() error {
+	errg, _ := errgroup.WithContext(s.ctx)
+	errg.Go(func() error {
+		s.logger.Print("Starting Git daemon", "addr", s.Config.Git.ListenAddr)
+		if err := s.GitDaemon.Start(); !errors.Is(err, daemon.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+	errg.Go(func() error {
+		s.logger.Print("Starting HTTP server", "addr", s.Config.HTTP.ListenAddr)
+		if err := s.HTTPServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+	errg.Go(func() error {
+		s.logger.Print("Starting SSH server", "addr", s.Config.SSH.ListenAddr)
+		if err := s.SSHServer.ListenAndServe(); !errors.Is(err, ssh.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+	errg.Go(func() error {
+		s.logger.Print("Starting Stats server", "addr", s.Config.Stats.ListenAddr)
+		if err := s.StatsServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+	errg.Go(func() error {
+		s.Cron.Start()
+		return nil
+	})
+	return errg.Wait()
 }
 
 // Shutdown lets the server gracefully shutdown.
-func (srv *Server) Shutdown(ctx context.Context) error {
-	return srv.SSHServer.Shutdown(ctx)
+func (s *Server) Shutdown(ctx context.Context) error {
+	errg, ctx := errgroup.WithContext(ctx)
+	errg.Go(func() error {
+		return s.GitDaemon.Shutdown(ctx)
+	})
+	errg.Go(func() error {
+		return s.HTTPServer.Shutdown(ctx)
+	})
+	errg.Go(func() error {
+		return s.SSHServer.Shutdown(ctx)
+	})
+	errg.Go(func() error {
+		return s.StatsServer.Shutdown(ctx)
+	})
+	errg.Go(func() error {
+		for _, j := range jobs.List() {
+			s.Cron.Remove(j.ID)
+		}
+		s.Cron.Shutdown()
+		return nil
+	})
+	// defer s.DB.Close() // nolint: errcheck
+	return errg.Wait()
 }
 
 // Close closes the SSH server.
-func (srv *Server) Close() error {
-	return srv.SSHServer.Close()
+func (s *Server) Close() error {
+	var errg errgroup.Group
+	errg.Go(s.GitDaemon.Close)
+	errg.Go(s.HTTPServer.Close)
+	errg.Go(s.SSHServer.Close)
+	errg.Go(s.StatsServer.Close)
+	errg.Go(func() error {
+		s.Cron.Stop()
+		return nil
+	})
+	// defer s.DB.Close() // nolint: errcheck
+	return errg.Wait()
 }

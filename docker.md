@@ -15,6 +15,9 @@ docker run \
   --name=soft-serve \
   --volume /path/to/data:/soft-serve \
   --publish 23231:23231 \
+  --publish 23232:23232 \
+  --publish 23233:23233 \
+  --publish 9418:9418 \
   --restart unless-stopped \
   charmcli/soft-serve:latest
 ```
@@ -32,11 +35,21 @@ services:
       - /path/to/data:/soft-serve
     ports:
       - 23231:23231
+      - 23232:23232
+      - 23233:23233
+      - 9418:9418
     restart: unless-stopped
 ```
 
 [docker]: https://hub.docker.com/r/charmcli/soft-serve
 [ghcr]: https://github.com/charmbracelet/soft-serve/pkgs/container/soft-serve
+
+
+> **Warning**
+>
+> Make sure to run the image without a TTY, i.e.: do not use the `--tty`/`-t`
+> flags.
+
 
 ***
 

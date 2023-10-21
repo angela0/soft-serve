@@ -2,6 +2,7 @@ package git
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/gogs/git-module"
 )
@@ -29,21 +30,15 @@ func Clone(src, dst string, opts ...git.CloneOptions) error {
 
 // Init initializes and opens a new git repository.
 func Init(path string, bare bool) (*Repository, error) {
+	if bare {
+		path = strings.TrimSuffix(path, ".git") + ".git"
+	}
+
 	err := git.Init(path, git.InitOptions{Bare: bare})
 	if err != nil {
 		return nil, err
 	}
 	return Open(path)
-}
-
-func isInsideWorkTree(r *git.Repository) bool {
-	out, err := r.RevParse("--is-inside-work-tree")
-	return err == nil && out == "true"
-}
-
-func isInsideGitDir(r *git.Repository) bool {
-	out, err := r.RevParse("--is-inside-git-dir")
-	return err == nil && out == "true"
 }
 
 func gitDir(r *git.Repository) (string, error) {
@@ -67,14 +62,9 @@ func Open(path string) (*Repository, error) {
 	}, nil
 }
 
-// Name returns the name of the repository.
-func (r *Repository) Name() string {
-	return filepath.Base(r.Path)
-}
-
 // HEAD returns the HEAD reference for a repository.
 func (r *Repository) HEAD() (*Reference, error) {
-	rn, err := r.SymbolicRef()
+	rn, err := r.Repository.SymbolicRef(git.SymbolicRefOptions{Name: "HEAD"})
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +99,19 @@ func (r *Repository) References() ([]*Reference, error) {
 	return rrefs, nil
 }
 
+// LsTree returns the tree for the given reference.
+func (r *Repository) LsTree(ref string) (*Tree, error) {
+	tree, err := r.Repository.LsTree(ref)
+	if err != nil {
+		return nil, err
+	}
+	return &Tree{
+		Tree:       tree,
+		Path:       "",
+		Repository: r,
+	}, nil
+}
+
 // Tree returns the tree for the given reference.
 func (r *Repository) Tree(ref *Reference) (*Tree, error) {
 	if ref == nil {
@@ -118,15 +121,7 @@ func (r *Repository) Tree(ref *Reference) (*Tree, error) {
 		}
 		ref = rref
 	}
-	tree, err := r.LsTree(ref.Hash.String())
-	if err != nil {
-		return nil, err
-	}
-	return &Tree{
-		Tree:       tree,
-		Path:       "",
-		Repository: r,
-	}, nil
+	return r.LsTree(ref.Hash.String())
 }
 
 // TreePath returns the tree for the given path.
@@ -147,7 +142,11 @@ func (r *Repository) TreePath(ref *Reference, path string) (*Tree, error) {
 
 // Diff returns the diff for the given commit.
 func (r *Repository) Diff(commit *Commit) (*Diff, error) {
-	ddiff, err := r.Repository.Diff(commit.Hash.String(), DiffMaxFiles, DiffMaxFileLines, DiffMaxLineChars)
+	ddiff, err := r.Repository.Diff(commit.Hash.String(), DiffMaxFiles, DiffMaxFileLines, DiffMaxLineChars, git.DiffOptions{
+		CommandOptions: git.CommandOptions{
+			Envs: []string{"GIT_CONFIG_GLOBAL=/dev/null"},
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +181,7 @@ func (r *Repository) Patch(commit *Commit) (string, error) {
 
 // CountCommits returns the number of commits in the repository.
 func (r *Repository) CountCommits(ref *Reference) (int64, error) {
-	return r.Repository.RevListCount([]string{ref.Name().String()})
+	return r.RevListCount([]string{ref.Name().String()})
 }
 
 // CommitsByPage returns the commits for a given page and size.
@@ -201,9 +200,15 @@ func (r *Repository) CommitsByPage(ref *Reference, page, size int) (Commits, err
 	return commits, nil
 }
 
-// UpdateServerInfo updates the repository server info.
-func (r *Repository) UpdateServerInfo() error {
-	cmd := git.NewCommand("update-server-info")
-	_, err := cmd.RunInDir(r.Path)
-	return err
+// SymbolicRef returns or updates the symbolic reference for the given name.
+// Both name and ref can be empty.
+func (r *Repository) SymbolicRef(name string, ref string, opts ...git.SymbolicRefOptions) (string, error) {
+	var opt git.SymbolicRefOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
+	opt.Name = name
+	opt.Ref = ref
+	return r.Repository.SymbolicRef(opt)
 }

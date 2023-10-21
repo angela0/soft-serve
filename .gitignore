@@ -1,9 +1,11 @@
 cmd/soft/soft
+./soft
 .ssh
 .repos
 dist
-testdata
+data/
 completions/
 manpages/
 soft
 soft-serve.tgz
+soft_serve_ed25519*

@@ -1,5 +1,6 @@
 run:
   tests: false
+  timeout: 5m
 
 issues:
   include:
@@ -15,20 +16,22 @@ issues:
 linters:
   enable:
     - bodyclose
-    - dupl
     - exportloopref
-    - goconst
-    - godot
-    - godox
     - goimports
-    - goprintffuncname
     - gosec
-    - ifshort
-    - misspell
-    - prealloc
+    - nilerr
+    - predeclared
     - revive
     - rowserrcheck
     - sqlclosecheck
+    - tparallel
     - unconvert
     - unparam
     - whitespace
+
+severity:
+  default-severity: error
+  rules:
+    - linters:
+        - revive
+      severity: info
