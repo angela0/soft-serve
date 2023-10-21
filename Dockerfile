@@ -1,2 +1,2 @@
 FROM alpine:latest
-RUN apk update && apk add --update git && rm -rf /var/cache/apk/*
+RUN apk update && apk add --update git bash && rm -rf /var/cache/apk/*
